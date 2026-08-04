@@ -1,7 +1,7 @@
 import { clampToUsable, edgeInsetMs, offsetAtTime, sampleTimes, snapToSample, timeAtOffset } from '../filmstrip';
 import { FLAT_CONTRAST_THRESHOLD, isFlat, pickBestFrame, rankFrame } from '../scoring';
 import { RoomStateStore, stateEvent } from '../roomState';
-import { DEFAULT_ORDER, resolveThumbnailSettings, STATE_THUMBNAIL } from '../settings';
+import { DECODE_AVERSE_ORDER, DEFAULT_ORDER, resolveThumbnailSettings, STATE_THUMBNAIL } from '../settings';
 import { resolveThumbnail } from '../strategy';
 import type { FrameSample, FrameScore } from '../types';
 import { createFakeProvider, DEFAULT_CAPABILITIES, frameQualityAt } from '../../experiment/fakeProvider';
@@ -127,10 +127,12 @@ describe('resolveThumbnail', () => {
   const provider = createFakeProvider(DEFAULT_CAPABILITIES);
 
   it('logs every strategy it tried, including the ones that could not run', async () => {
-    const video = clip('fade_in', 12_000, 20);
-    const result = await resolveThumbnail(video, provider, settingsFrom().settings, { now: fakeNow() });
+    // The decode-averse chain is no longer the default, but it is still the
+    // arrangement that shows the platform gap most plainly.
+    const settings = settingsFrom({ strategy_order: DECODE_AVERSE_ORDER }).settings;
+    const result = await resolveThumbnail(clip('fade_in', 12_000, 20), provider, settings, { now: fakeNow() });
 
-    expect(result.attempts.map((a) => a.strategy)).toEqual(DEFAULT_ORDER.slice(0, 3));
+    expect(result.attempts.map((a) => a.strategy)).toEqual(DECODE_AVERSE_ORDER.slice(0, 3));
     expect(result.attempts[0].outcome.status).toBe('unavailable');
     expect(result.attempts[0].outcome).toMatchObject({
       reason: expect.stringContaining('expo-media-library'),
@@ -138,20 +140,42 @@ describe('resolveThumbnail', () => {
     expect(result.candidate?.strategy).toBe('frame_at');
   });
 
-  it('produces the black first frame the base case is famous for', async () => {
+  it('produces the black first frame the decode-averse chain is famous for', async () => {
+    const settings = settingsFrom({ strategy_order: DECODE_AVERSE_ORDER }).settings;
     const video = clip('fade_in', 12_000, 21);
-    const result = await resolveThumbnail(video, provider, settingsFrom().settings, { now: fakeNow() });
+    const result = await resolveThumbnail(video, provider, settings, { now: fakeNow() });
     expect(result.candidate?.atMs).toBe(0);
     expect(isFlat(frameQualityAt(video, result.candidate!.atMs!))).toBe(true);
   });
 
-  it('lets the library win when the native module exists', async () => {
+  it('no longer avoids a decode by default, because scrubbing decodes anyway', async () => {
     const withLibrary = createFakeProvider({ ...DEFAULT_CAPABILITIES, hasLibraryThumbnails: true });
-    const result = await resolveThumbnail(clip('fade_in', 12_000, 22), withLibrary, settingsFrom().settings, {
-      now: fakeNow(),
-    });
+    const video = clip('fade_in', 12_000, 22);
+    const result = await resolveThumbnail(video, withLibrary, settingsFrom().settings, { now: fakeNow() });
+
+    // Even with the native module present, sampling outranks it: a frame the
+    // scorer chose beats a frame the OS happened to cache.
+    expect(result.candidate?.strategy).toBe('scored_sample');
+    expect(isFlat(frameQualityAt(video, result.candidate!.atMs!))).toBe(false);
+    expect(result.attempts.map((a) => a.strategy)).toEqual(['user_pick', 'scored_sample']);
+  });
+
+  it('still lets the library win when it is asked to lead', async () => {
+    const withLibrary = createFakeProvider({ ...DEFAULT_CAPABILITIES, hasLibraryThumbnails: true });
+    const settings = settingsFrom({ strategy_order: DECODE_AVERSE_ORDER }).settings;
+    const result = await resolveThumbnail(clip('fade_in', 12_000, 23), withLibrary, settings, { now: fakeNow() });
     expect(result.candidate?.strategy).toBe('library');
     expect(result.candidate?.atMs).toBeNull();
+    expect(result.attempts).toHaveLength(1);
+  });
+
+  it('puts a chosen frame ahead of everything, by default', async () => {
+    const video = clip('well_lit', 20_000, 24);
+    const result = await resolveThumbnail(video, provider, settingsFrom().settings, {
+      now: fakeNow(),
+      userPick: { uri: 'synthetic://24/7200', atMs: 7200 },
+    });
+    expect(result.candidate).toMatchObject({ strategy: 'user_pick', atMs: 7200 });
     expect(result.attempts).toHaveLength(1);
   });
 

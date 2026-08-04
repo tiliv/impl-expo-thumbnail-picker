@@ -1,46 +1,50 @@
 # impl-expo-thumbnail-picker
 
-A contained, runnable experiment for **getting a thumbnail out of a video** —
-the base case, and the timeline picker it eventually wants to become.
+A contained, runnable experiment for **staging media before it is sent** —
+describing it, adjusting it, and choosing which frame represents a video.
 
 Expo SDK 57, dev client.
 
 ```bash
 npm install
 npx expo run:ios      # or run:android — dev client, not Expo Go
-npm test              # 40 tests, no device needed
+npm test              # 86 tests, no device needed
 npm run typecheck
 ```
 
-## Read this bit first
+Two modes, switchable in the header:
 
-The base case as stated — *use whatever the photo library had for it, if that's
-available, or the first frame* — has a problem in each half.
+- **staging** — the draft view. Attachments you can still change: description,
+  filters, thumbnail. This is the main event.
+- **resolution** — the strategy chain, for the attachments nobody opened a
+  sheet for.
 
-**The library half does not run.** As of `expo-media-library` 57, the JS API
-exposes no system-generated video thumbnail on either platform.
-`getAssetInfoAsync` returns `localUri`, dimensions, EXIF and location, and
-nothing else. The thumbnails the OS already generated — the ones Photos scrolls
-through instantly — are reachable only from native:
+## The premise changed, deliberately
 
-| | |
-| --- | --- |
-| iOS | `PHImageManager.requestImage(for:targetSize:contentMode:options:)` |
-| Android | `ContentResolver.loadThumbnail(uri, size, signal)` |
+The original chain led with `library` — use the OS's cached thumbnail, avoid a
+decode. **That reasoning does not survive a scrubber.** The moment someone
+drags a timeline we are decoding frames anyway, and the library thumbnail has
+saved us exactly one. So the default order now leads with the author's own
+choice and falls back to sampling — both of which decode, on purpose:
 
-That is a small config-plugin module: one method, takes an asset id and a
-target size, returns a file URI. **Worth writing.** Falling through to
-extraction means decoding the video, which is roughly two orders of magnitude
-slower than handing back a thumbnail the OS made at import time — on a grid of
-videos that is the difference between instant and visibly janky.
+```
+user_pick → scored_sample → frame_at → library → placeholder
+```
 
-**The first-frame half is usually the worst available guess.** Fade-ins,
-autoexposure settling, and splash screens on screen recordings all live at
-t=0. Frame zero is black more often than not.
+`library` stays at the back for the case that still matters: an attachment
+nobody opened. `DECODE_AVERSE_ORDER` is kept and selectable in the panel so the
+two are comparable, and the tests assert both.
 
-Neither of these is a reason not to ship the base case. They are reasons the
-code needs an attempt log, so the answer to "why is this video grey" is on
-screen instead of in a debugging session.
+The platform finding still stands and is still worth knowing. As of
+`expo-media-library` 57, the JS API exposes no system-generated video
+thumbnail on either platform — `getAssetInfoAsync` returns `localUri`,
+dimensions, EXIF and location, nothing else. Reaching the OS's own thumbnails
+means native (`PHImageManager` / `ContentResolver.loadThumbnail`). It is just
+no longer on the critical path.
+
+**Frame zero is still usually the worst guess.** Fade-ins, autoexposure
+settling and splash screens all live at t=0 — which is now the third fallback
+rather than the primary answer, so it costs a lot less.
 
 ## The chain
 
@@ -106,25 +110,112 @@ in a worklet. Until one exists `scored_sample` reports `unavailable` on device.
 The experiment ships a synthetic scorer so the ranking policy is still
 exercisable — and fully tested.
 
-## The stretch goal
+## The scrubber is not a player
 
-`allow_user_pick` gates a filmstrip scrubber. Drag the strip, the preview
-follows, "use this frame" wins the chain outright.
+A player's playhead has its own intention — it wants to keep moving, and you
+are trying to hold it on one frame. That is two behaviours fighting, and it is
+why picking a thumbnail out of a video player is unpleasant.
 
-Two details that separate it from a slider, both in `core/filmstrip.ts` so they
-are testable without a gesture:
+So there is no play button, no transport, no autoplay, no timeline that runs on
+its own. **The playhead moves while a finger is on it and stays where it was
+left.** Scrubbing is the interaction, not a mode grafted onto playback.
 
-- **Snapping.** Dragging generates far more positions than can be extracted.
-  Snapping to the filmstrip's already-extracted times stops the preview
-  flickering between cached and fresh frames, which otherwise reads as jitter
-  rather than precision.
-- **Debounced extraction.** The filmstrip is the immediate feedback; the sharp
-  preview catches up ~120ms later.
+What replaces playback is **precision**. Drag away from the strip — up or down,
+whichever way there is room — and the same horizontal travel covers less time:
 
-Built on `PanResponder` rather than gesture-handler — one fewer native module
-to reconcile when this lands in the real app. If the scrub needs to run off the
-JS thread, swapping in gesture-handler and Reanimated touches only
-`FrameScrubber.tsx`; the maths does not move.
+| Distance from strip | Ratio |
+| --- | --- |
+| 0 | Full |
+| 60 | Half |
+| 130 | Quarter |
+| 210 | Fine (6%) |
+
+Four discrete detents rather than a continuous ramp, because a continuous one
+is impossible to feel your way back to and people navigate this by muscle
+memory. Each detent fires a haptic and thickens the playhead, so you can feel
+it without looking away from the preview.
+
+That mechanic forces the one non-obvious decision in `core/scrub.ts`:
+**position integrates from deltas, it is not mapped from absolute x.**
+
+The tempting version maps the finger's x across the track straight to a
+timestamp. It is simpler, and it breaks the instant precision changes: at
+quarter speed the finger and the playhead are no longer in the same place, so
+recomputing from absolute x snaps the playhead back under the finger and throws
+away the fine adjustment that was the entire point. Integrating scaled deltas
+means changing precision mid-drag is seamless — which is what makes sliding
+away feel like leaning in rather than like switching modes. There is a test
+that holds x still, changes dy, and asserts the position does not move at all.
+
+Also: tapping the strip is an absolute jump, dragging is relative. Same
+surface, and the difference is which gesture you did. Frame-step buttons exist
+because the last 30ms of a hunt is faster to tap than to drag — and because a
+bare drag surface has no switch-accessible equivalent.
+
+Built on `PanResponder` and RN's `Animated`. Finger tracking is JS-bound either
+way, so Reanimated would buy the settle animations rather than the drag; if the
+scrub ever needs to leave the JS thread, only `ScrubDeck.tsx` changes and the
+maths does not move.
+
+## The staging sheet
+
+Attaching is not committing. Items sit in a draft carrying their own
+description, edit list and chosen thumbnail, and tapping one reopens its sheet
+— as often as you like, right up until send.
+
+Sheet order is deliberate: **picture, description, filters, thumbnail.** The
+picture is first because that is what you tapped. The description is second
+because it is the thing people skip, and burying it under the fun part
+guarantees they skip it.
+
+### Describing it
+
+The centre of this is not the validation, it is the **READS AS** line:
+
+```
+READS AS   Image. Photo of a blue door
+```
+
+A field labelled "alt text" collects filenames. A field that shows what a
+screen reader will actually say collects sentences, because the doubling in
+"Image. Photo of…" is visible and "Image. IMG_4471" is visibly not an answer.
+
+The checks are lint, not gatekeeping — missing, too short, pasted filename,
+redundant opener (with a one-tap trim). Only a room that sets
+`require_alt_text: required`, or a genuine length overrun, blocks the send. A
+mediocre description beats a blocked send and an annoyed author.
+
+### Adjusting it
+
+Non-destructive: the original URI is never touched, an item carries an ordered
+edit list, and every edit is individually removable. Presets are just sets of
+slider values, so nudging one afterwards does not drop you into a "custom"
+mode — there is nothing to fall out of.
+
+Previews are **real**, not approximate. RN 0.76+ ships a `filter` style prop
+backed by the platform compositor — brightness, contrast, saturate, grayscale,
+sepia, hueRotate, invert, blur — so this is the same pipeline a browser uses,
+on the GPU, with no extra dependency. Warmth is the one stand-in: there is no
+warmth primitive, so it is approximated as a hue rotation.
+
+### The bit that matters
+
+**A non-destructive edit list is, by construction, reversible.** That is the
+point while drafting and a serious problem at send time.
+
+If someone blurs out a house number and we transmit original + `blur 8px`, the
+recipient has the house number. The privacy affordance the user thinks they
+applied is decoration.
+
+So edits are classified. Cosmetic ones can travel as a list — smaller, and the
+recipient renders at their own resolution. **Redactive ones are force-baked**,
+and `bakeRequirement` overrides `send_edits: with_original` when it sees one.
+That is not a preference the room gets to hold. The blur slider marks itself
+"hides detail · will be flattened" the moment it crosses the threshold, so the
+reclassification is visible while you are dragging rather than at send.
+
+A room configured `with_original` also raises a danger-level warning at resolve
+time, because it is the wrong default for anywhere people redact.
 
 ## Synthetic clips
 
@@ -144,6 +235,10 @@ actual camera roll does to the extraction path.
 `allow_user_pick`, `filmstrip_frames`, `sample_count`, `max_dimension`,
 `quality`, `reject_flat_frames`.
 
+`app.envelope.staging`: `require_alt_text` (`off` / `warn` / `required`),
+`alt_text_max_chars`, `allow_filters`, `send_edits` (`baked` /
+`with_original`), `max_attachments`.
+
 Room-controlled because rooms have opinions: one that must not surface an
 unreviewed frame wants `allow_user_pick` off and a fixed time; one full of long
 screen recordings wants sampling.
@@ -157,9 +252,11 @@ renderer has to handle it.
 ## Layout
 
 ```
-src/core/           strategy chain, scoring policy, filmstrip maths, settings
+src/core/           scrub maths, edit list, alt-text policy, draft reducer,
+                    strategy chain, scoring policy, settings
 src/adapters/       expoProvider — the real one, and where the honest notes live
-src/ui/             thumbnail card with attempt log, filmstrip scrubber
+src/ui/             staging tray, item sheet, scrub deck, filter rail,
+                    alt-text field, thumbnail card with attempt log
 src/experiment/     synthetic clips, fake provider, scenarios, control panel
 ```
 
@@ -167,12 +264,23 @@ See [`docs/INTEGRATION.md`](docs/INTEGRATION.md).
 
 ## Known edges
 
-- No caching or persistence. Every resolve re-extracts; a real app wants a
-  content-addressed thumbnail cache, and `resolveThumbnail` has no cache hook.
+- **Baking is not implemented.** `bakeRequirement` returns a requirement;
+  nothing flattens pixels. RN's `filter` renders, it does not export. The bake
+  path is `react-native-view-shot`'s `captureRef` over the filtered view, Skia,
+  or a server-side transform — an adapter, and the one real gap between this
+  and shipping. A redactive edit currently *says* it will be flattened and
+  nothing flattens it.
+- **The draft is not persisted.** The reducer is pure and the state is
+  serialisable specifically so it can be, and it is not wired up. Someone who
+  has written four descriptions and lost them to a backgrounded app does not
+  write them again.
+- Warmth's preview is a hue-rotate stand-in. A real warmth control is a colour
+  matrix, which needs the same GPU pass baking needs.
+- No caching. Every resolve re-extracts; `resolveThumbnail` has no cache hook,
+  deliberately — see `docs/INTEGRATION.md`.
 - `max_dimension` resolves but nothing downscales — `expo-video-thumbnails`
   takes `quality`, not a target size.
-- The scrubber does not play the video. Swapping in `expo-video`'s seek for a
-  live preview is the obvious upgrade and would remove the extraction debounce
-  entirely.
-- Extraction is sequential. Sampling nine frames on a long clip is slow enough
-  to want a concurrency limit and a cancel path, and has neither.
+- Extraction is sequential with no cancel path. Sampling nine frames on a long
+  clip is slow enough to want a concurrency limit and an abort signal.
+- Reordering exists in the reducer and is tested, but the tray has no drag
+  handle wired to it.

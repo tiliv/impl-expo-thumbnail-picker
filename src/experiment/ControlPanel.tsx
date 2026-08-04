@@ -12,7 +12,15 @@ import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-nati
 import * as ImagePicker from 'expo-image-picker';
 
 import { stateEvent } from '../core/roomState';
-import { describeSource, STATE_THUMBNAIL, type Resolved } from '../core/settings';
+import {
+  DECODE_AVERSE_ORDER,
+  DEFAULT_ORDER,
+  describeSource,
+  STATE_STAGING,
+  STATE_THUMBNAIL,
+  type Resolved,
+} from '../core/settings';
+import type { SendEditsPolicy } from '../core/edits';
 import type { ThumbnailStrategy } from '../core/types';
 import { theme } from '../ui/theme';
 import { SCENARIOS } from './scenarios';
@@ -42,19 +50,26 @@ function Row({ label, source, children }: { label: string; source?: string; chil
 const src = <T,>(r: Resolved<T>) => describeSource(r.source);
 
 const ORDERS: { label: string; order: ThumbnailStrategy[] }[] = [
-  { label: 'base case', order: ['library', 'embedded', 'frame_at', 'placeholder'] },
-  { label: 'sampled', order: ['library', 'scored_sample', 'frame_at', 'placeholder'] },
-  { label: 'user first', order: ['user_pick', 'scored_sample', 'frame_at', 'placeholder'] },
+  { label: 'default', order: DEFAULT_ORDER },
+  // The original chain, kept for comparison: it led with `library` to dodge a
+  // decode, which stops being worth optimising once scrubbing is the interaction.
+  { label: 'decode-averse', order: DECODE_AVERSE_ORDER },
+  { label: 'sampled only', order: ['scored_sample', 'frame_at', 'placeholder'] },
   { label: 'no fallback', order: ['library', 'frame_at'] },
 ];
 
 export function ControlPanel() {
-  const { world, settings, warnings, scenario, setScenario } = useExperiment();
+  const { world, settings, staging, warnings, scenario, setScenario } = useExperiment();
   const [tab, setTab] = useState<'scenario' | 'room' | 'platform'>('scenario');
 
   const send = (patch: Record<string, unknown>) => {
     const current = world.stateStore.get(STATE_THUMBNAIL)?.content ?? {};
     world.stateStore.send(stateEvent(STATE_THUMBNAIL, { ...current, ...patch }));
+  };
+
+  const sendStaging = (patch: Record<string, unknown>) => {
+    const current = world.stateStore.get(STATE_STAGING)?.content ?? {};
+    world.stateStore.send(stateEvent(STATE_STAGING, { ...current, ...patch }));
   };
 
   /**
@@ -101,7 +116,7 @@ export function ControlPanel() {
         {tab === 'scenario' && (
           <>
             <Text style={styles.question}>{scenario.question}</Text>
-            {(['base-case', 'sampling', 'picker', 'failure'] as const).map((group) => (
+            {(['staging', 'base-case', 'sampling', 'picker', 'failure'] as const).map((group) => (
               <View key={group}>
                 <Text style={styles.sectionLabel}>{group}</Text>
                 <View style={styles.chipWrap}>
@@ -192,6 +207,41 @@ export function ControlPanel() {
                   label={v ? 'on' : 'off'}
                   active={settings.rejectFlatFrames.value === v}
                   onPress={() => send({ reject_flat_frames: v })}
+                />
+              ))}
+            </Row>
+
+            <Text style={styles.sectionLabel}>app.envelope.staging</Text>
+
+            <Row label="require_alt_text" source={src(staging.requireAltText)}>
+              {(['off', 'warn', 'required'] as const).map((v) => (
+                <Chip
+                  key={v}
+                  label={v}
+                  active={staging.requireAltText.value === v}
+                  onPress={() => sendStaging({ require_alt_text: v })}
+                />
+              ))}
+            </Row>
+
+            <Row label="send_edits" source={src(staging.sendEdits)}>
+              {(['baked', 'with_original'] as SendEditsPolicy[]).map((v) => (
+                <Chip
+                  key={v}
+                  label={v.replace('_', ' ')}
+                  active={staging.sendEdits.value === v}
+                  onPress={() => sendStaging({ send_edits: v })}
+                />
+              ))}
+            </Row>
+
+            <Row label="allow_filters" source={src(staging.allowFilters)}>
+              {[true, false].map((v) => (
+                <Chip
+                  key={String(v)}
+                  label={v ? 'on' : 'off'}
+                  active={staging.allowFilters.value === v}
+                  onPress={() => sendStaging({ allow_filters: v })}
                 />
               ))}
             </Row>

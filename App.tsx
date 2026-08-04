@@ -1,23 +1,139 @@
-import React, { useState } from 'react';
-import { Modal, ScrollView, StyleSheet, Text, View } from 'react-native';
+import React, { useCallback, useMemo, useReducer, useState } from 'react';
+import { Alert, Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
+import * as ImagePicker from 'expo-image-picker';
 
+import {
+  draftReadiness,
+  draftReducer,
+  emptyDraft,
+  stage,
+  type StagedSource,
+} from './src/core/draft';
 import { ControlPanel } from './src/experiment/ControlPanel';
 import { ExperimentProvider, useExperiment } from './src/experiment/ExperimentContext';
-import { FrameScrubber } from './src/ui/FrameScrubber';
+import { ItemSheet } from './src/ui/ItemSheet';
+import { ScrubDeck } from './src/ui/ScrubDeck';
+import { StagingTray } from './src/ui/StagingTray';
 import { ThumbnailCard } from './src/ui/ThumbnailCard';
 import { theme } from './src/ui/theme';
 
-function Gallery() {
+type Mode = 'staging' | 'resolution';
+
+/**
+ * The draft/staging view.
+ *
+ * This is the composer side: media that has been attached but not sent, still
+ * fully editable. Tapping an item reopens its sheet, which is the whole point
+ * of staging rather than a one-shot picker — nothing decided at attach time is
+ * final.
+ */
+function Staging() {
+  const { world, settings, staging } = useExperiment();
+  const [draft, dispatch] = useReducer(draftReducer, undefined, () => {
+    const items = world.videos().map((video) =>
+      stage({
+        kind: 'video',
+        uri: video.uri,
+        filename: video.filename,
+        width: video.width,
+        height: video.height,
+        durationMs: video.durationMs,
+      }),
+    );
+    return { ...emptyDraft(), items };
+  });
+
+  const { canSend, issues } = draftReadiness(draft, staging, staging.sendEdits.value);
+  const open = draft.items.find((i) => i.id === draft.openItemId) ?? null;
+
+  const attach = useCallback(async () => {
+    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!permission.granted) {
+      Alert.alert('Library access needed', 'Grant access to attach real media.');
+      return;
+    }
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images', 'videos'],
+      allowsMultipleSelection: true,
+      selectionLimit: staging.maxAttachments.value,
+      quality: 1,
+    });
+    if (result.canceled) return;
+
+    const items = result.assets.map((asset) => {
+      const source: StagedSource = {
+        kind: asset.type === 'video' ? 'video' : 'image',
+        uri: asset.uri,
+        filename: asset.fileName ?? undefined,
+        width: asset.width,
+        height: asset.height,
+        durationMs: asset.duration ?? undefined,
+      };
+      return stage(source);
+    });
+    dispatch({ type: 'attach', items });
+  }, [staging.maxAttachments]);
+
+  return (
+    <>
+      <ScrollView style={styles.flex} contentContainerStyle={styles.stagingBody}>
+        <Text style={styles.blurb}>
+          Attachments stay editable until the message is sent. Tap one to describe it, adjust it, or
+          pick the frame that represents it.
+        </Text>
+        {draft.items.length === 0 && (
+          <Text style={styles.empty}>Nothing attached. Use + to add something.</Text>
+        )}
+      </ScrollView>
+
+      <StagingTray
+        draft={draft}
+        issues={issues}
+        canSend={canSend}
+        onOpen={(id) => dispatch({ type: 'open', id })}
+        onAttach={attach}
+        onSend={() =>
+          Alert.alert(
+            'Send',
+            `${draft.items.length} attachment(s) would go now, with edits ${staging.sendEdits.value === 'baked' ? 'flattened' : 'as a list'}.`,
+          )
+        }
+      />
+
+      {open && (
+        <ItemSheet
+          item={open}
+          settings={settings}
+          staging={staging}
+          provider={world.providerFor(open.id)}
+          onChangeAlt={(alt) => dispatch({ type: 'set_alt', id: open.id, alt })}
+          onChangeEdits={(edits) => dispatch({ type: 'set_edits', id: open.id, edits })}
+          onChangeThumbnail={(choice) =>
+            dispatch({
+              type: 'set_thumbnail',
+              id: open.id,
+              thumbnail: { ...choice, chosenByUser: true },
+            })
+          }
+          onRemove={() => dispatch({ type: 'remove', id: open.id })}
+          onClose={() => dispatch({ type: 'close' })}
+        />
+      )}
+    </>
+  );
+}
+
+/** The original view: what the chain resolves when nobody opened a sheet. */
+function Resolution() {
   const { world, settings } = useExperiment();
   const [scrubbing, setScrubbing] = useState<string | null>(null);
-
   const target = world.videos().find((v) => v.id === scrubbing) ?? null;
 
   return (
     <>
-      <ScrollView style={styles.gallery} contentContainerStyle={styles.galleryContent}>
+      <ScrollView style={styles.flex} contentContainerStyle={styles.galleryContent}>
         {world.videos().map((video) => (
           <ThumbnailCard
             key={video.id}
@@ -35,16 +151,18 @@ function Gallery() {
       <Modal visible={target !== null} animationType="slide" onRequestClose={() => setScrubbing(null)}>
         <View style={styles.scrubRoot}>
           {target && (
-            <FrameScrubber
-              video={target}
-              provider={world.providerFor(target.id)}
-              settings={settings}
-              onUse={(choice) => {
-                world.pick(target.id, choice);
-                setScrubbing(null);
-              }}
-              onCancel={() => setScrubbing(null)}
-            />
+            <>
+              <ScrubDeck
+                video={target}
+                provider={world.providerFor(target.id)}
+                settings={settings}
+                initialAtMs={world.pickFor(target.id)?.atMs}
+                onChange={(choice) => world.pick(target.id, choice)}
+              />
+              <Pressable style={styles.done} onPress={() => setScrubbing(null)}>
+                <Text style={styles.doneText}>Done</Text>
+              </Pressable>
+            </>
           )}
         </View>
       </Modal>
@@ -55,14 +173,25 @@ function Gallery() {
 function Screen() {
   const insets = useSafeAreaInsets();
   const { scenario } = useExperiment();
+  const [mode, setMode] = useState<Mode>('staging');
+
+  const modes = useMemo(() => ['staging', 'resolution'] as Mode[], []);
 
   return (
     <View style={[styles.root, { paddingTop: insets.top }]}>
       <View style={styles.header}>
-        <Text style={styles.title}>{scenario.title}</Text>
-        <Text style={styles.subtitle}>{scenario.group}</Text>
+        <View style={styles.modeRow}>
+          {modes.map((m) => (
+            <Pressable key={m} onPress={() => setMode(m)} style={[styles.mode, mode === m && styles.modeActive]}>
+              <Text style={[styles.modeText, mode === m && styles.modeTextActive]}>{m}</Text>
+            </Pressable>
+          ))}
+        </View>
+        <Text style={styles.subtitle}>{scenario.title}</Text>
       </View>
-      <Gallery />
+
+      {mode === 'staging' ? <Staging /> : <Resolution />}
+
       <View style={{ paddingBottom: insets.bottom }}>
         <ControlPanel />
       </View>
@@ -83,16 +212,30 @@ export default function App() {
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: theme.bg },
+  flex: { flex: 1 },
   header: {
     paddingHorizontal: 14,
     paddingBottom: 10,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: theme.border,
+    gap: 6,
   },
-  title: { color: theme.text, fontSize: 17, fontWeight: '700' },
-  subtitle: { color: theme.textFaint, fontSize: 11, marginTop: 2, textTransform: 'uppercase', letterSpacing: 1 },
-  gallery: { flex: 1 },
+  modeRow: { flexDirection: 'row', gap: 6 },
+  mode: {
+    paddingHorizontal: 12,
+    paddingVertical: 5,
+    borderRadius: 999,
+    backgroundColor: theme.surfaceAlt,
+  },
+  modeActive: { backgroundColor: theme.accentDim },
+  modeText: { color: theme.textDim, fontSize: 12, textTransform: 'capitalize' },
+  modeTextActive: { color: theme.text, fontWeight: '700' },
+  subtitle: { color: theme.textFaint, fontSize: 11 },
+  stagingBody: { padding: 14, gap: 10 },
+  blurb: { color: theme.textDim, fontSize: 13, lineHeight: 18 },
   galleryContent: { padding: 10, gap: 10 },
-  scrubRoot: { flex: 1, backgroundColor: theme.bg, paddingTop: 60, paddingHorizontal: 16 },
+  scrubRoot: { flex: 1, backgroundColor: theme.bg, paddingTop: 60, paddingHorizontal: 16, gap: 16 },
+  done: { paddingVertical: 13, borderRadius: 10, alignItems: 'center', backgroundColor: theme.accentDim },
+  doneText: { color: theme.text, fontSize: 14, fontWeight: '700' },
   empty: { color: theme.textFaint, textAlign: 'center', marginTop: 40, fontSize: 13 },
 });
