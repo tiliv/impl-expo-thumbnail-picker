@@ -1,0 +1,44 @@
+{
+  "expo": {
+    "name": "thumbnail-picker",
+    "slug": "impl-expo-thumbnail-picker",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "org.example.implexpothumbnailpicker"
+    },
+    "android": {
+      "package": "org.example.implexpothumbnailpicker",
+      "adaptiveIcon": {
+        "backgroundColor": "#0e1116",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Pick a video to test thumbnail extraction against."
+        }
+      ],
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "Read video assets to test library thumbnails.",
+          "savePhotosPermission": "Save generated thumbnails.",
+          "isAccessMediaLocationEnabled": false
+        }
+      ]
+    ]
+  }
+}
