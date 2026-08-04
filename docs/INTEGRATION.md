@@ -192,3 +192,31 @@ that assume you can see the image.
 
 The sibling media-message template has both `alt` and `note` on its items for
 this reason. Keep them separate when these merge.
+
+---
+
+## The wire, added later
+
+`core/envelope.ts` + `core/packing.ts` now take a staged draft to a real room event.
+Two findings, both about bytes rather than shape:
+
+1. **A redactive edit must be flattened before upload.** Uploading the original plus
+   an edit hint puts the redacted content in the ciphertext. `uploadPlan().mustFlatten`
+   names the items; the wire hints exclude redactive edits; the receive path filters
+   them again. This is the one in the set that fails silently and irreversibly.
+2. **A custom thumbnail is a second blob.** Ten-media revocation means five videos
+   with picked thumbnails, not ten. `uploadPlan()` counts blobs, and mediaIds are
+   ordered so a truncated revoke sheds thumbnails first.
+
+Both have to be computed before upload — flattening cannot be retrofitted, and
+finding the cap after twelve uploads leaves twelve orphans.
+
+Consequences for the strategy chain this repo already documented: `user_pick` now
+has a **cost** the other strategies do not, because it is the only one that produces
+a blob to upload and revoke. That does not change the ordering argument — once there
+is a scrubber you are decoding anyway — but it does mean the decode-averse
+comparison is no longer only about decode time.
+
+Still open: nothing round-tripped against a live deployment, and no flattening
+implementation exists. `mustFlatten` currently names work that nothing does yet,
+which is the honest state — the alternative was a plan that quietly skipped it.
