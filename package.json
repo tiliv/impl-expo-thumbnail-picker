@@ -13,6 +13,7 @@
   "dependencies": {
     "expo": "~57.0.9",
     "expo-dev-client": "~57.0.10",
+    "expo-haptics": "~57.0.1",
     "expo-image": "~57.0.1",
     "expo-image-picker": "~57.0.7",
     "expo-media-library": "~57.0.3",
@@ -32,7 +33,9 @@
   },
   "jest": {
     "preset": "jest-expo",
-    "testMatch": ["**/__tests__/**/*.test.ts?(x)"]
+    "testMatch": [
+      "**/__tests__/**/*.test.ts?(x)"
+    ]
   },
   "private": true
 }

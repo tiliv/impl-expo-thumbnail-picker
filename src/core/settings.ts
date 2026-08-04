@@ -12,8 +12,10 @@
 
 import type { RoomStateStore } from './roomState';
 import type { ThumbnailStrategy } from './types';
+import type { SendEditsPolicy } from './edits';
 
 export const STATE_THUMBNAIL = 'app.envelope.thumbnail';
+export const STATE_STAGING = 'app.envelope.staging';
 
 export type SettingSource =
   | { kind: 'default' }
@@ -42,14 +44,32 @@ export interface ThumbnailSettings {
   rejectFlatFrames: Resolved<boolean>;
 }
 
+/**
+ * The staging sheet's policy.
+ *
+ * Separate from `ThumbnailSettings` because it answers a different question —
+ * that one is "what thumbnail does this video get", this one is "what must be
+ * true of an attachment before it can be sent".
+ */
+export interface StagingSettings {
+  /** `required` blocks the send button; `warn` surfaces it; `off` says nothing. */
+  requireAltText: Resolved<'off' | 'warn' | 'required'>;
+  altTextMaxChars: Resolved<number>;
+  allowFilters: Resolved<boolean>;
+  /** Whether edits travel as a reversible list or are flattened first. */
+  sendEdits: Resolved<SendEditsPolicy>;
+  maxAttachments: Resolved<number>;
+}
+
 export interface SettingsWarning {
-  setting: keyof ThumbnailSettings;
+  setting: keyof ThumbnailSettings | keyof StagingSettings;
   severity: 'info' | 'warn' | 'danger';
   message: string;
 }
 
 export interface ResolvedThumbnailSettings {
   settings: ThumbnailSettings;
+  staging: StagingSettings;
   warnings: SettingsWarning[];
 }
 
@@ -62,12 +82,35 @@ const ALL_STRATEGIES: ThumbnailStrategy[] = [
   'placeholder',
 ];
 
-/** The stated base case: library if we can get it, else the first frame. */
-export const DEFAULT_ORDER: ThumbnailStrategy[] = ['library', 'embedded', 'frame_at', 'placeholder'];
+/**
+ * Picking a frame means decoding the video anyway.
+ *
+ * The original chain led with `library` to avoid a decode. That reasoning does
+ * not survive a scrubber: the moment someone drags, we are decoding, and the
+ * library thumbnail has saved us exactly one frame. So the default now leads
+ * with the author's own choice and falls back to sampling — both of which
+ * decode, deliberately.
+ *
+ * `library` stays in the chain, last before the placeholder, for the case that
+ * still matters: an attachment nobody opened the sheet for. It is a cheap
+ * `unavailable` when the native module is missing.
+ */
+export const DEFAULT_ORDER: ThumbnailStrategy[] = [
+  'user_pick',
+  'scored_sample',
+  'frame_at',
+  'library',
+  'placeholder',
+];
+
+/** What the chain used to be, kept so the two are comparable in the panel. */
+export const DECODE_AVERSE_ORDER: ThumbnailStrategy[] = ['library', 'embedded', 'frame_at', 'placeholder'];
 
 const DEFAULTS = {
+  // 0 is still the worst single guess, but it is now the third fallback rather
+  // than the primary path, so it costs a lot less.
   defaultFrameMs: 0,
-  allowUserPick: false,
+  allowUserPick: true,
   filmstripFrames: 9,
   sampleCount: 7,
   maxDimension: 720,
@@ -80,31 +123,35 @@ export const DEFAULT_SOURCE: SettingSource = { kind: 'default' };
 export function resolveThumbnailSettings(store: RoomStateStore): ResolvedThumbnailSettings {
   const warnings: SettingsWarning[] = [];
   const event = store.get(STATE_THUMBNAIL);
+  const stagingEvent = store.get(STATE_STAGING);
 
-  const sourceOf = (): SettingSource =>
-    event
-      ? { kind: 'state_event', type: event.type, eventId: event.eventId, sender: event.sender, originTs: event.originTs }
+  type Event = typeof event;
+
+  const sourceOf = (from: Event): SettingSource =>
+    from
+      ? { kind: 'state_event', type: from.type, eventId: from.eventId, sender: from.sender, originTs: from.originTs }
       : DEFAULT_SOURCE;
 
   function read<T>(
-    setting: keyof ThumbnailSettings,
+    setting: SettingsWarning['setting'],
     field: string,
     fallback: T,
     validate: (raw: unknown) => T | null,
+    from: Event = event,
   ): Resolved<T> {
-    if (!event || !(field in event.content)) return { value: fallback, source: DEFAULT_SOURCE };
-    const raw = event.content[field];
+    if (!from || !(field in from.content)) return { value: fallback, source: DEFAULT_SOURCE };
+    const raw = from.content[field];
     if (raw === null || raw === undefined) return { value: fallback, source: DEFAULT_SOURCE };
     const ok = validate(raw);
     if (ok === null) {
       warnings.push({
         setting,
         severity: 'warn',
-        message: `${event.type}.${field} = ${JSON.stringify(raw)} is not usable; using default`,
+        message: `${from.type}.${field} = ${JSON.stringify(raw)} is not usable; using default`,
       });
       return { value: fallback, source: DEFAULT_SOURCE };
     }
-    return { value: ok, source: sourceOf() };
+    return { value: ok, source: sourceOf(from) };
   }
 
   const int = (min: number, max: number) => (raw: unknown): number | null =>
@@ -162,7 +209,7 @@ export function resolveThumbnailSettings(store: RoomStateStore): ResolvedThumbna
         message: 'No placeholder at the end of the chain: videos can resolve to no thumbnail at all.',
       });
     }
-    return { value: parsed, source: sourceOf() };
+    return { value: parsed, source: sourceOf(event) };
   })();
 
   const settings: ThumbnailSettings = {
@@ -192,6 +239,39 @@ export function resolveThumbnailSettings(store: RoomStateStore): ResolvedThumbna
     });
   }
 
+  const staging: StagingSettings = {
+    requireAltText: read(
+      'requireAltText',
+      'require_alt_text',
+      'warn' as const,
+      (raw) => (raw === 'off' || raw === 'warn' || raw === 'required' ? raw : null),
+      stagingEvent,
+    ),
+    altTextMaxChars: read('altTextMaxChars', 'alt_text_max_chars', 1000, int(40, 4000), stagingEvent),
+    allowFilters: read('allowFilters', 'allow_filters', true, bool, stagingEvent),
+    sendEdits: read(
+      'sendEdits',
+      'send_edits',
+      'baked' as SendEditsPolicy,
+      (raw) => (raw === 'baked' || raw === 'with_original' ? raw : null),
+      stagingEvent,
+    ),
+    maxAttachments: read('maxAttachments', 'max_attachments', 10, int(1, 32), stagingEvent),
+  };
+
+  // The combination that makes a privacy affordance decorative. Redactive
+  // edits get force-baked regardless (see `bakeRequirement`), but a room
+  // configured this way is asking for the unsafe thing and should hear about it.
+  if (staging.sendEdits.value === 'with_original') {
+    warnings.push({
+      setting: 'sendEdits',
+      severity: 'danger',
+      message:
+        'Edits are sent alongside the original, which makes them reversible. ' +
+        'Anything blurred to hide it is force-baked, but this is the wrong default for a room where people redact.',
+    });
+  }
+
   if (settings.strategyOrder.value.includes('user_pick') && !settings.allowUserPick.value) {
     warnings.push({
       setting: 'allowUserPick',
@@ -200,7 +280,7 @@ export function resolveThumbnailSettings(store: RoomStateStore): ResolvedThumbna
     });
   }
 
-  return { settings, warnings };
+  return { settings, staging, warnings };
 }
 
 export function describeSource(source: SettingSource): string {

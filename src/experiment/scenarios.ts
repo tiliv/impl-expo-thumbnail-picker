@@ -9,14 +9,14 @@
  */
 
 import { stateEvent } from '../core/roomState';
-import { STATE_THUMBNAIL } from '../core/settings';
+import { STATE_STAGING, STATE_THUMBNAIL } from '../core/settings';
 import { clip, type ExperimentWorld } from './world';
 
 export interface Scenario {
   id: string;
   title: string;
   question: string;
-  group: 'base-case' | 'sampling' | 'picker' | 'failure';
+  group: 'base-case' | 'sampling' | 'picker' | 'failure' | 'staging';
   arrange(world: ExperimentWorld): void;
   expect: string[];
   tryNext?: string[];
@@ -24,6 +24,9 @@ export interface Scenario {
 
 const config = (content: Record<string, unknown>) =>
   stateEvent(STATE_THUMBNAIL, content, { sender: '@admin:example.org' });
+
+const stagingConfig = (content: Record<string, unknown>) =>
+  stateEvent(STATE_STAGING, content, { sender: '@admin:example.org' });
 
 export const SCENARIOS: Scenario[] = [
   {
@@ -226,7 +229,77 @@ export const SCENARIOS: Scenario[] = [
   },
 ];
 
-export const DEFAULT_SCENARIO = SCENARIOS[0];
+SCENARIOS.push(
+  {
+    id: 'staging-basic',
+    title: 'Staging a draft',
+    group: 'staging',
+    question: 'What can you still change after attaching?',
+    arrange(w) {
+      w.add(clip('fade_in', 14_000, 210), clip('well_lit', 22_000, 40));
+    },
+    expect: [
+      'Both clips land in the tray with "no description" badges and auto frames.',
+      'Tapping one opens its sheet: describe, adjust, thumbnail.',
+      'Everything stays editable until send — reopen the sheet as often as you like.',
+      'The READS AS line shows what a screen reader will actually announce.',
+    ],
+    tryNext: ['Type "Photo of the whiteboard" and watch the announcement read "Image. Photo of…".'],
+  },
+
+  {
+    id: 'staging-alt-required',
+    title: 'Room requires descriptions',
+    group: 'staging',
+    question: 'Can a room insist attachments are described?',
+    arrange(w) {
+      w.stateStore.send(stagingConfig({ require_alt_text: 'required' }));
+      w.add(clip('well_lit', 18_000, 90), clip('shaky', 12_000, 300));
+    },
+    expect: [
+      'Send is blocked until every attachment has a description.',
+      'The blocking issues name which item, so a tray of eight is navigable.',
+      'Set it back to warn and send unblocks while the nudge stays.',
+    ],
+  },
+
+  {
+    id: 'staging-redaction',
+    title: 'Blurring something out',
+    group: 'staging',
+    question: 'Is a non-destructive blur actually private?',
+    arrange(w) {
+      w.stateStore.send(stagingConfig({ send_edits: 'with_original' }));
+      w.add(clip('well_lit', 16_000, 120));
+    },
+    expect: [
+      'A room-level danger warning fires immediately: edits sent with the original are reversible.',
+      'Push blur past 3 and the slider marks it "hides detail · will be flattened".',
+      'The sheet says the image will be baked anyway, overriding the room policy.',
+      'That override is not a preference — a reversible redaction is a decoration.',
+    ],
+    tryNext: ['Set send_edits back to baked and watch the wording change but the outcome stay safe.'],
+  },
+
+  {
+    id: 'staging-scrub',
+    title: 'Fine scrubbing',
+    group: 'staging',
+    question: 'Can you land on one specific frame without a player?',
+    arrange(w) {
+      w.stateStore.send(config({ filmstrip_frames: 14 }));
+      w.add(clip('fade_in', 30_000, 260), clip('screen_recording', 45_000, 120));
+    },
+    expect: [
+      'No play button anywhere. The playhead moves only under your finger.',
+      'Drag away from the strip and the pill shows Half, Quarter, Fine — each with a haptic.',
+      'Position integrates from deltas, so changing precision mid-drag never snaps the playhead.',
+      'Tapping the strip is an absolute jump; dragging is relative. Same surface, different gesture.',
+    ],
+  },
+);
+
+export const DEFAULT_SCENARIO = SCENARIOS.find((s) => s.id === 'staging-basic') ?? SCENARIOS[0];
 
 export function loadScenario(world: ExperimentWorld, scenario: Scenario): void {
   world.reset();
