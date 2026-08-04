@@ -284,3 +284,51 @@ See [`docs/INTEGRATION.md`](docs/INTEGRATION.md).
   clip is slow enough to want a concurrency limit and an abort signal.
 - Reordering exists in the reducer and is tested, but the tray has no drag
   handle wired to it.
+
+---
+
+## The wire boundary: what actually gets uploaded
+
+`src/core/envelope.ts` (byte-identical across the `impl-expo-*` repos) and
+`src/core/packing.ts` connect staging to the shape the Noodles API moves. The other
+sandboxes' packing is mostly about content shape; this one is about **bytes**, and
+it found two things that constrain the feature.
+
+### A redactive edit cannot ship as a rendering hint
+
+The tempting design is to upload the original and put the edit list in the envelope
+so the recipient applies it. That is fine for `brightness` and `sepia`. It is a
+privacy hole for `blur`: ship the original plus `{ blur: 8 }` and the unblurred
+pixels are in the ciphertext, where every recipient — and anyone who ever gets that
+room key — can simply not apply the hint.
+
+`edits.isRedactive()` already drew this line (`blur` has `redactiveAbove: 3`).
+`uploadPlan()` reads it and returns `mustFlatten` for the items whose edits have to
+be **baked into the bytes before upload**. Getting this backwards produces a feature
+that appears to work perfectly and silently ships exactly what the user thought they
+had removed.
+
+`transmissibleEdits()` drops redactive edits from the wire hints — they are already
+in the pixels, so sending them would apply them twice — and the receive path filters
+them again. The asymmetry is deliberate: we cannot un-see pixels, only decline to
+un-blur them.
+
+### A custom thumbnail is a second blob, and it counts against the cap
+
+A chosen video frame is its own encrypted blob with its own `mediaId`. So a video
+with an author-picked thumbnail costs **two** of the ten `mediaIds` that
+`RevokeRoomMessageRequest` (`maxItems: 10`) can cover.
+
+**Five such videos and the envelope is at the ceiling.** The limit reads as "10
+attachments" and is really "10 blobs", which is why `uploadPlan()` counts blobs.
+`packStaged` orders mediaIds item-then-thumbnail so a truncated revoke drops
+thumbnails before originals.
+
+Both are pre-upload decisions: flattening cannot be retrofitted onto an upload, and
+discovering the cap after uploading twelve files means twelve orphans. `uploadPlan()`
+runs before any bytes leave.
+
+Two smaller things: the thumbnail travels as a **full encrypted file, not a URL** —
+it needs its own key, and a recipient who cannot decrypt it must still be able to
+play the video. And **alt text has to outlive the pixels**, because a screen reader
+on a 410'd image still wants it.
