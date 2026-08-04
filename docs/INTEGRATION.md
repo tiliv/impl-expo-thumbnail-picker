@@ -16,9 +16,9 @@ Pure TypeScript, no React, no React Native.
 `src/adapters/expoProvider.ts` comes too, and is the file to read before
 deciding what to build.
 
-## 2. Decide about the native library-thumbnail module
+## 2. The native library-thumbnail module is now optional
 
-This is the main call this repo exists to inform.
+It used to be the main call this repo existed to inform. It is not any more.
 
 Writing it means a config plugin with one method per platform:
 
@@ -28,13 +28,18 @@ iOS      PHImageManager.default().requestImage(
 Android  contentResolver.loadThumbnail(uri, Size(w, h), null)
 ```
 
-Both return quickly from a cache the OS already maintains. Skipping it means
-every video thumbnail costs a decode, which on a scrolling grid is the
-difference between instant and janky.
+Both return quickly from a cache the OS already maintains. The reason to build
+it was avoiding a decode — and once the staging sheet lets people scrub, the
+decode happens anyway the moment anyone drags. The module saves one frame.
 
-If you skip it, keep the `library` strategy in the chain anyway. It costs one
-`unavailable` entry in the log, and it means adding the module later is a
-provider change rather than a chain change.
+So it is now worth building only for one case: **grids of videos nobody opened
+a sheet for.** If your timeline renders many un-staged videos at once, the
+saving is still real and still the difference between instant and janky. If
+attachments are nearly always staged before sending, skip it.
+
+Either way keep `library` in the chain. It costs one `unavailable` entry in the
+log, and adding the module later becomes a provider change rather than a chain
+change.
 
 ## 3. Implement `ThumbnailProvider`
 
@@ -87,12 +92,18 @@ ships on a scrolling list:
 ## 6. Wire the scrubber, or do not
 
 `allow_user_pick` gates the whole picker. If the first sprint ships without it,
-leave `user_pick` out of the default `strategy_order` rather than shipping it
-disabled — a strategy that always skips is noise in every log line.
+leave `user_pick` out of `strategy_order` rather than shipping it disabled — a
+strategy that always skips is noise in every log line.
 
-If you do ship it, `core/filmstrip.ts` is the part that matters and
-`FrameScrubber.tsx` is replaceable. Swapping `PanResponder` for
-gesture-handler + Reanimated touches only the component.
+If you do ship it, `core/scrub.ts` and `core/filmstrip.ts` are the parts that
+matter and `ScrubDeck.tsx` is replaceable. Swapping `PanResponder` for
+gesture-handler + Reanimated touches only the component; the delta integrator
+does not move.
+
+Keep the integrator when you port it. Mapping absolute x to a timestamp is the
+obvious implementation and it silently breaks variable-precision scrubbing —
+see the comment at the top of `core/scrub.ts`, and the test that holds x still
+while changing dy.
 
 ## Decisions still to make
 
