@@ -14,6 +14,8 @@ import {
 import { ControlPanel } from './src/experiment/ControlPanel';
 import { ExperimentProvider, useExperiment } from './src/experiment/ExperimentContext';
 import { ItemSheet } from './src/ui/ItemSheet';
+import { PermissionArea } from './src/ui/PermissionArea';
+import { useLibraryPermission } from './src/ui/useLibraryPermission';
 import { ScrubDeck } from './src/ui/ScrubDeck';
 import { StagingTray } from './src/ui/StagingTray';
 import { ThumbnailCard } from './src/ui/ThumbnailCard';
@@ -45,15 +47,15 @@ function Staging() {
     return { ...emptyDraft(), items };
   });
 
+  const library = useLibraryPermission('attaching media');
   const { canSend, issues } = draftReadiness(draft, staging, staging.sendEdits.value);
   const open = draft.items.find((i) => i.id === draft.openItemId) ?? null;
 
   const attach = useCallback(async () => {
-    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!permission.granted) {
-      Alert.alert('Library access needed', 'Grant access to attach real media.');
-      return;
-    }
+    // No alert on refusal. An alert says its piece, gets dismissed, and leaves
+    // nothing on screen — while the attach button still looks like it works.
+    // The block below carries the state instead, and it stays.
+    if (!library.usable) return;
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ['images', 'videos'],
       allowsMultipleSelection: true,
@@ -74,7 +76,7 @@ function Staging() {
       return stage(source);
     });
     dispatch({ type: 'attach', items });
-  }, [staging.maxAttachments]);
+  }, [staging.maxAttachments, library.usable]);
 
   return (
     <>
@@ -87,6 +89,13 @@ function Staging() {
           <Text style={styles.empty}>Nothing attached. Use + to add something.</Text>
         )}
       </ScrollView>
+
+      {/*
+        Above the tray rather than replacing it: the tray still holds whatever
+        was already staged, and a person with limited access can still work with
+        it. Only the *attach* affordance is gone, so only that region is covered.
+      */}
+      <PermissionArea affordance={library.affordance} onAct={(e) => void library.act(e)} />
 
       <StagingTray
         draft={draft}

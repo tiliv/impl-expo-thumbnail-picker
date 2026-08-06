@@ -8,7 +8,7 @@
  */
 
 import React, { useState } from 'react';
-import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 
 import { stateEvent } from '../core/roomState';
@@ -23,6 +23,8 @@ import {
 import type { SendEditsPolicy } from '../core/edits';
 import type { ThumbnailStrategy } from '../core/types';
 import { theme } from '../ui/theme';
+import { PermissionArea } from '../ui/PermissionArea';
+import { useLibraryPermission } from '../ui/useLibraryPermission';
 import { SCENARIOS } from './scenarios';
 import { useExperiment } from './ExperimentContext';
 
@@ -61,6 +63,7 @@ const ORDERS: { label: string; order: ThumbnailStrategy[] }[] = [
 export function ControlPanel() {
   const { world, settings, staging, warnings, scenario, setScenario } = useExperiment();
   const [tab, setTab] = useState<'scenario' | 'room' | 'platform'>('scenario');
+  const library = useLibraryPermission('adding a real video');
 
   const send = (patch: Record<string, unknown>) => {
     const current = world.stateStore.get(STATE_THUMBNAIL)?.content ?? {};
@@ -78,11 +81,10 @@ export function ControlPanel() {
    * the extraction path.
    */
   const addRealVideo = async () => {
-    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!permission.granted) {
-      Alert.alert('Library access needed', 'Grant photo access to test against a real video.');
-      return;
-    }
+    // Gated on the same state the composer uses, rather than a second copy of
+    // the request-and-alert dance. Two copies of a permission flow is two
+    // places for one of them to grow a fix the other does not.
+    if (!library.usable) return;
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ['videos'],
       quality: 1,
@@ -138,7 +140,18 @@ export function ControlPanel() {
               </Text>
             ))}
             <View style={{ marginTop: 12 }}>
-              <Chip label="+ add a real video from the library" onPress={addRealVideo} />
+              {library.affordance.kind === 'none' ? (
+                <Chip label="+ add a real video from the library" onPress={addRealVideo} />
+              ) : (
+                // Replaces the chip rather than sitting beside it. A disabled
+                // chip next to an explanation is two things saying the same
+                // thing, and the one that can be tapped is the wrong one.
+                <PermissionArea
+                  affordance={library.affordance}
+                  onAct={(e) => void library.act(e)}
+                  minHeight={132}
+                />
+              )}
             </View>
           </>
         )}
